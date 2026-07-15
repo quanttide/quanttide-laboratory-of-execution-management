@@ -38,7 +38,7 @@ journal file
 
 **目标**：搭出最小可用流程，验证 chunk → extract → diff → output 闭环。
 
-- [x] 实验目录结构确立（`experiments/default/`）
+- [x] 实验目录结构确立（`examples/default/`）
 - [x] 实验数据准备（journal + profile 基线）
 - [x] ROADMAP
 - [ ] `distill.py`：argparse + dry-run 模式
