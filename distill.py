@@ -3,13 +3,16 @@
 
 Usage:
     python distill.py --dry-run
-    python distill.py ../../data/journal/2026-07-14.md --dry-run
+    python distill.py data/journal/2026-07-14.md --dry-run
     python distill.py --apply
+    python distill.py --apply --commit
 """
 
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 
 from quanttide_agent.llm import LLM, Message
@@ -19,6 +22,21 @@ DATA_DIR = os.path.join(REPO_ROOT, "data")
 JOURNAL_DIR = os.path.join(DATA_DIR, "journal")
 PROMPTS_DIR = os.path.join(REPO_ROOT, "prompts")
 PROFILE_PATH = os.path.join(DATA_DIR, "profile", "index.md")
+
+SECTION_ORDER = ["日程", "下一步行动", "等待回复", "悬而未决"]
+SECTION_TITLES = {
+    "日程": "日程 📅",
+    "下一步行动": "下一步行动",
+    "等待回复": "等待回复",
+    "悬而未决": "悬而未决",
+}
+PRIORITY_SORT = {"高": 0, "中": 1, "低": 2}
+
+ITEM_RE = re.compile(
+    r'^- (?:\[ \]\s+)?\*\*(.+?)\*\*(?:[—\-–]\s*(.*))?$'
+)
+PRIORITY_RE = re.compile(r'>\s*优先级：\s*(\S+)')
+DISCUSSION_RE = re.compile(r'（待讨论）')
 
 
 def load_prompt(name: str) -> str:
@@ -32,9 +50,7 @@ def chunk(text: str) -> list[str]:
     return paragraphs
 
 
-def extract(
-    llm: LLM, paragraphs: list[str], journal_name: str
-) -> dict:
+def extract(llm: LLM, paragraphs: list[str], journal_name: str) -> dict:
     prompt = load_prompt("extract.md")
     journal_text = (
         f"## {journal_name}\n\n"
@@ -57,12 +73,100 @@ def read_profile() -> str | None:
     return None
 
 
-def diff(llm: LLM, candidates: dict, existing_profile: str | None) -> str:
+# ---------------------------------------------------------------------------
+# Profile 解析 / 渲染
+# ---------------------------------------------------------------------------
+
+def parse_profile(text: str) -> dict[str, list[dict]]:
+    sections: dict[str, list[dict]] = {s: [] for s in SECTION_ORDER}
+    current_section = None
+    cur_item = None
+
+    for line in text.split("\n"):
+        hdr = re.match(r"^## (.+)", line)
+        if hdr:
+            current_section = _match_section(hdr.group(1).strip())
+            cur_item = None
+            continue
+        if current_section is None:
+            continue
+
+        m = ITEM_RE.match(line)
+        if m:
+            title = m.group(1).strip()
+            description = (m.group(2) or "").strip()
+            is_done = not line.lstrip().startswith("- [ ]")
+            discussion = bool(DISCUSSION_RE.search(title))
+            title = DISCUSSION_RE.sub("", title).strip()
+            cur_item = {
+                "title": title,
+                "description": description,
+                "category": current_section,
+                "priority": "中",
+                "is_done": is_done,
+                "discussion": discussion,
+                "detail": "",
+            }
+            sections.setdefault(current_section, []).append(cur_item)
+            continue
+
+        if cur_item and line.strip().startswith(">"):
+            content = line.strip()[1:].strip()
+            if PRIORITY_RE.search(line):
+                cur_item["priority"] = PRIORITY_RE.search(line).group(1)
+            elif content:
+                cur_item["detail"] = (
+                    cur_item["detail"] + " " + content
+                    if cur_item["detail"]
+                    else content
+                )
+
+    return sections
+
+
+def _match_section(line: str) -> str | None:
+    for s in SECTION_ORDER:
+        if s in line:
+            return s
+    return None
+
+
+def render_profile(sections: dict[str, list[dict]]) -> str:
+    lines = ["# 量潮GTD清单"]
+    for section_name in SECTION_ORDER:
+        lines.append("")
+        lines.append(f"## {SECTION_TITLES.get(section_name, section_name)}")
+        lines.append("")
+        items = sections.get(section_name, [])
+        items = sorted(items, key=lambda x: PRIORITY_SORT.get(x["priority"], 1))
+        for item in items:
+            title = item["title"]
+            if item.get("discussion"):
+                title += "（待讨论）"
+            desc = item.get("description", "")
+            prefix = "" if item.get("is_done") else "[ ] "
+            line = f"- {prefix}**{title}**"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+            if item.get("detail"):
+                lines.append(f"  > {item['detail']}")
+            lines.append(f"  > 优先级：{item['priority']}")
+            lines.append("")
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Diff & Apply
+# ---------------------------------------------------------------------------
+
+def diff(llm: LLM, candidates: dict, sections: dict) -> dict:
     prompt = load_prompt("diff.md")
     content = json.dumps(
         {
             "candidates": candidates,
-            "existing_profile": existing_profile or "（尚无清单）",
+            "current_items": sections,
         },
         ensure_ascii=False,
         indent=2,
@@ -71,15 +175,79 @@ def diff(llm: LLM, candidates: dict, existing_profile: str | None) -> str:
         Message(role="system", content=prompt),
         Message(role="user", content=content),
     ]
-    resp = llm.complete(messages)
-    return resp.content
+    resp = llm.complete(messages, response_format={"type": "json_object"})
+    return json.loads(resp.content)
 
 
-def apply(proposal: str) -> None:
-    os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
-    with open(PROFILE_PATH, "w") as f:
-        f.write(proposal)
-    print(f"已写入 {PROFILE_PATH}")
+def apply_patch(patch: dict, sections: dict) -> dict:
+    for add in patch.get("additions", []):
+        cat = _match_section(add.get("category", ""))
+        if cat is None:
+            print(f"  警告: 未知板块 '{add.get('category')}'，跳过新增", file=sys.stderr)
+            continue
+        sections.setdefault(cat, []).append({
+            "title": add["title"],
+            "description": add.get("description", ""),
+            "category": cat,
+            "priority": add.get("priority", "中"),
+            "is_done": False,
+            "discussion": False,
+            "detail": "",
+        })
+
+    for merge in patch.get("merges", []):
+        cat = _match_section(merge.get("category", ""))
+        if cat is None:
+            continue
+        target = _find_item(sections, cat, merge["target_title"])
+        if target:
+            if "new_description" in merge:
+                target["description"] = merge["new_description"]
+            if "new_priority" in merge:
+                target["priority"] = merge["new_priority"]
+
+    for disc in patch.get("discussions", []):
+        cat = _match_section(disc.get("category", ""))
+        if cat is None:
+            continue
+        target = _find_item(sections, cat, disc["title"])
+        if target:
+            target["discussion"] = True
+
+    return sections
+
+
+def _find_item(sections: dict, category: str, title: str) -> dict | None:
+    for item in sections.get(category, []):
+        if item["title"] == title:
+            return item
+    return None
+
+
+def commit() -> None:
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    try:
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "distill: 更新 GTD 清单"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        print("已 commit")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip()
+        if "nothing to commit" in stderr:
+            print("无变更，跳过 commit")
+        else:
+            print(f"commit 失败: {stderr}", file=sys.stderr)
 
 
 def main() -> None:
@@ -122,7 +290,6 @@ def main() -> None:
     for jf in journal_files:
         with open(jf) as f:
             text = f.read()
-
         paragraphs = chunk(text)
         jname = os.path.basename(jf)
         print(f"处理: {jname} ({len(paragraphs)} 段)")
@@ -142,21 +309,38 @@ def main() -> None:
         print("未提取到任何条目")
         return
 
-    existing_profile = read_profile()
-    print(f"\n正在比对现有清单…")
-    proposal = diff(llm, all_candidates, existing_profile)
+    profile_text = read_profile()
+    sections = parse_profile(profile_text) if profile_text else {s: [] for s in SECTION_ORDER}
 
-    print("\n" + "=" * 60)
-    print("变更提案")
-    print("=" * 60)
-    print(proposal)
+    print(f"\n正在比对现有清单…")
+    patch = diff(llm, all_candidates, sections)
+
+    if patch.get("additions"):
+        print(f"\n新增 {len(patch['additions'])} 条:")
+        for a in patch["additions"]:
+            print(f"  [{a['category']}] {a['title']}")
+    if patch.get("merges"):
+        print(f"\n合并 {len(patch['merges'])} 条:")
+        for m in patch["merges"]:
+            print(f"  [{m['category']}] {m['target_title']}")
+    if patch.get("discussions"):
+        print(f"\n待讨论 {len(patch['discussions'])} 条:")
+        for d in patch["discussions"]:
+            print(f"  [{d['category']}] {d['title']}: {d.get('reason', '')}")
 
     if args.dry_run:
         print("\n--- dry-run 模式，未做任何修改 ---")
-    elif args.apply:
-        apply(proposal)
+        return
+
+    if args.apply:
+        sections = apply_patch(patch, sections)
+        rendered = render_profile(sections)
+        os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
+        with open(PROFILE_PATH, "w") as f:
+            f.write(rendered)
+        print(f"已写入 {PROFILE_PATH}")
         if args.commit:
-            os.system("git add -A && git commit -m 'distill: 更新 GTD 清单'")
+            commit()
     else:
         print("\n提示: 使用 --dry-run 仅查看，使用 --apply 写入文件")
 
