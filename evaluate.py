@@ -13,7 +13,7 @@ import re
 import sys
 
 ITEM_RE = re.compile(
-    r'^- (?:\[ \]\s+)?\*\*(.+?)\*\*(?:[—\-–]\s*(.*))?$'
+    r'^- (?:\[ \]\s+)?\*\*(.+?)\*\*(?:\s*[—\-–]\s*(.*))?\s*$'
 )
 PRIORITY_RE = re.compile(r'>\s*优先级：\s*(\S+)')
 DISCUSSION_RE = re.compile(r'（待讨论）')

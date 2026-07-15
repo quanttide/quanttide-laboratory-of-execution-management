@@ -33,7 +33,7 @@ SECTION_TITLES = {
 PRIORITY_SORT = {"高": 0, "中": 1, "低": 2}
 
 ITEM_RE = re.compile(
-    r'^- (?:\[ \]\s+)?\*\*(.+?)\*\*(?:[—\-–]\s*(.*))?$'
+    r'^- (?:\[ \]\s+)?\*\*(.+?)\*\*(?:\s*[—\-–]\s*(.*))?\s*$'
 )
 PRIORITY_RE = re.compile(r'>\s*优先级：\s*(\S+)')
 DISCUSSION_RE = re.compile(r'（待讨论）')
@@ -218,8 +218,12 @@ def apply_patch(patch: dict, sections: dict) -> dict:
 
 
 def _find_item(sections: dict, category: str, title: str) -> dict | None:
+    target = title.strip()
     for item in sections.get(category, []):
-        if item["title"] == title:
+        if item["title"] == target:
+            return item
+    for item in sections.get(category, []):
+        if target in item["title"] or item["title"] in target:
             return item
     return None
 
@@ -328,21 +332,25 @@ def main() -> None:
         for d in patch["discussions"]:
             print(f"  [{d['category']}] {d['title']}: {d.get('reason', '')}")
 
+    sections = apply_patch(patch, sections)
+    rendered = render_profile(sections)
+
+    print("\n" + "=" * 60)
+    print("完整清单预览")
+    print("=" * 60)
+    print(rendered)
+
     if args.dry_run:
-        print("\n--- dry-run 模式，未做任何修改 ---")
+        print("--- dry-run 模式，未做任何修改 ---")
         return
 
     if args.apply:
-        sections = apply_patch(patch, sections)
-        rendered = render_profile(sections)
         os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
         with open(PROFILE_PATH, "w") as f:
             f.write(rendered)
         print(f"已写入 {PROFILE_PATH}")
         if args.commit:
             commit()
-    else:
-        print("\n提示: 使用 --dry-run 仅查看，使用 --apply 写入文件")
 
 
 if __name__ == "__main__":
