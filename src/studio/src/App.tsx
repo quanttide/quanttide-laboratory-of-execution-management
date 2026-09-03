@@ -4,6 +4,7 @@ import {
   PRIORITY_ICON,
   type Priority,
   type Task,
+  cyclePriority,
   dueLabel,
   sortTasks,
   startLabel,
@@ -154,6 +155,9 @@ export default function App() {
                 onToggle={() => patchTask(task.id, { done: !task.done })}
                 onDelete={() => setTasks((prev) => prev.filter((t) => t.id !== task.id))}
                 onEdit={() => setEditing(task)}
+                onCyclePriority={() =>
+                  patchTask(task.id, { priority: cyclePriority(task.priority) })
+                }
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setMenu({ x: e.clientX, y: e.clientY, task });
@@ -267,12 +271,14 @@ function TaskRow({
   onToggle,
   onDelete,
   onEdit,
+  onCyclePriority,
   onContextMenu,
 }: {
   task: Task;
   onToggle: () => void;
   onDelete: () => void;
   onEdit: () => void;
+  onCyclePriority: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const startText = startLabel(task.start);
@@ -281,9 +287,13 @@ function TaskRow({
 
   return (
     <li className={`card${task.done ? " done" : ""}`} onContextMenu={onContextMenu}>
-      <span className="pri-dot" title={`${task.priority}优先级`}>
+      <button
+        className="pri-dot"
+        title={`${task.priority}优先级（点击切换）`}
+        onClick={onCyclePriority}
+      >
         {PRIORITY_ICON[task.priority]}
-      </span>
+      </button>
       <button className="check" title={task.done ? "标记未完成" : "标记完成"} onClick={onToggle}>
         {task.done ? "☑" : "☐"}
       </button>

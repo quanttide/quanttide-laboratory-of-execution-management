@@ -19,6 +19,13 @@ export const PRIORITY_ICON: Record<Priority, string> = {
   低: "🔵",
 };
 
+/** 点击优先级圆点循环切换：高 → 中 → 低 → 高 */
+export function cyclePriority(p: Priority): Priority {
+  if (p === "高") return "中";
+  if (p === "中") return "低";
+  return "高";
+}
+
 const PRIORITY_ORDER: Record<Priority, number> = { 高: 0, 中: 1, 低: 2 };
 
 /** 未完成在前（高→中→低，同级按截止日期升序），完成在后（新→旧） */
